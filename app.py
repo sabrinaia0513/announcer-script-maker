@@ -271,8 +271,7 @@ def main():
                 service = Service("/usr/bin/chromedriver")
 
                 # 💡 [수정] 자동 다운로더(ChromeDriverManager)를 빼고, 위에서 지정한 service를 넣습니다.
-                driver = webdriver.Chrome(service=service, options=options)driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-                
+                driver = webdriver.Chrome(service=service, options=options)
                 # 문서 뼈대 만들기
                 doc = Document()
                 for sec in doc.sections:
