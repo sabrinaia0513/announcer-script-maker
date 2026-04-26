@@ -197,8 +197,9 @@ def main():
                 options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
                 # 로컬 환경 자동 드라이버 설정
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=options)
+                #service = Service(ChromeDriverManager().install())
+                #driver = webdriver.Chrome(service=service, options=options)
+                driver = webdriver.Chrome(options=options)
 
                 doc = Document()
                 for sec in doc.sections:
