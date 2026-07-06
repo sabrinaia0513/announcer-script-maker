@@ -1,0 +1,55 @@
+name: 매일 아침 원고 이메일 발송
+
+on:
+  schedule:
+    # UTC 21:00 = 한국시간 오전 6:00 (GitHub 사정에 따라 몇십 분 지연될 수 있음)
+    - cron: '0 21 * * *'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  generate-and-send:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Seoul
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 원고 생성
+        run: python generate.py
+
+      - name: 날짜 계산
+        id: date
+        run: |
+          echo "today=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "file=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: 이메일 발송
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: '🎙️ 오늘의 스터디 원고 (${{ steps.date.outputs.today }})'
+          to: ${{ secrets.MAIL_TO }}
+          from: 아나운서 원고 자판기 <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            오늘의 스터디 원고가 도착했습니다!
+            MBC 앵커멘트 3개, 연합뉴스 단신 7개, 속보 5개가 첨부되어 있어요.
+          attachments: output/Study_Scripts_${{ steps.date.outputs.file }}.docx
+
+      - name: 원고 백업 (이메일 실패 대비)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: study-script-${{ steps.date.outputs.file }}
+          path: output/*.docx
+          if-no-files-found: ignore

@@ -1,0 +1,25 @@
+name: Streamlit 앱 절전 방지
+
+on:
+  schedule:
+    # 6시간마다 접속 (정각은 혼잡해서 지연이 심하므로 23분으로 설정)
+    - cron: '23 */6 * * *'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Selenium 설치
+        run: pip install selenium
+
+      - name: 앱 접속해서 깨우기
+        env:
+          APP_URL: https://bongscript.streamlit.app
+        run: python keepalive.py
