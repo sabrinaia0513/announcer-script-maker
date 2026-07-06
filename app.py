@@ -1,6 +1,7 @@
 import time
 import re
 import io
+import shutil
 import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -8,7 +9,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
@@ -36,6 +36,26 @@ def clean_script(text):
     if "연합뉴스TV 기사문의" in text:
         text = text.split("연합뉴스TV 기사문의")[0]
     return text.strip()
+
+def create_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    # Streamlit Cloud: packages.txt로 설치된 chromium/chromedriver를 직접 지정
+    # (지정하지 않으면 Selenium Manager가 별도 Chrome을 받아오다 실행에 실패함)
+    chromium_path = shutil.which("chromium") or shutil.which("chromium-browser")
+    driver_path = shutil.which("chromedriver")
+    if chromium_path and driver_path:
+        options.binary_location = chromium_path
+        return webdriver.Chrome(service=Service(driver_path), options=options)
+
+    # 로컬 환경: 설치된 Chrome + Selenium Manager 자동 드라이버
+    return webdriver.Chrome(options=options)
 
 def click_more_button(driver, wait):
     try:
@@ -189,17 +209,7 @@ def main():
         with st.spinner("최신 기사를 수집하고 있습니다. 잠시만 기다려주세요..."):
             driver = None
             try:
-                options = Options()
-                options.add_argument("--headless=new")
-                options.add_argument("--no-sandbox")
-                options.add_argument("--disable-dev-shm-usage")
-                options.add_argument("--window-size=1920,1080")
-                options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-                # 로컬 환경 자동 드라이버 설정
-                #service = Service(ChromeDriverManager().install())
-                #driver = webdriver.Chrome(service=service, options=options)
-                driver = webdriver.Chrome(options=options)
+                driver = create_driver()
 
                 doc = Document()
                 for sec in doc.sections:
