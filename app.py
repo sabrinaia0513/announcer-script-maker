@@ -1,9 +1,12 @@
+import os
 import time
 import re
 import io
 import shutil
+import tempfile
 import streamlit as st
 from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -52,7 +55,29 @@ def create_driver():
     driver_path = shutil.which("chromedriver")
     if chromium_path and driver_path:
         options.binary_location = chromium_path
-        return webdriver.Chrome(service=Service(driver_path), options=options)
+        # Chromium 136+는 프로필 폴더가 잠겨 있거나 기본 폴더를 쓰면 곧바로 종료됨
+        # -> 매번 새 임시 프로필 폴더를 만들어 지정
+        user_data_dir = tempfile.mkdtemp(prefix="chrome-profile-")
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--disable-extensions")
+
+        log_path = os.path.join(tempfile.gettempdir(), "chromedriver.log")
+        service = Service(driver_path, service_args=["--verbose"], log_output=log_path)
+        try:
+            return webdriver.Chrome(service=service, options=options)
+        except WebDriverException as e:
+            # 실제 원인이 담긴 chromedriver 로그 끝부분을 오류 메시지에 포함
+            log_tail = ""
+            try:
+                with open(log_path, encoding="utf-8", errors="replace") as f:
+                    log_tail = "".join(f.readlines()[-50:])
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"브라우저 실행 실패: {e.msg}\n\n[ChromeDriver 상세 로그]\n{log_tail}"
+            ) from e
 
     # 로컬 환경: 설치된 Chrome + Selenium Manager 자동 드라이버
     return webdriver.Chrome(options=options)
