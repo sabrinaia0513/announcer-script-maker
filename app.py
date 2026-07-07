@@ -40,47 +40,73 @@ def clean_script(text):
         text = text.split("연합뉴스TV 기사문의")[0]
     return text.strip()
 
-def create_driver():
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+def _base_options():
     options = Options()
-    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.add_argument(f"user-agent={USER_AGENT}")
+    return options
 
+def create_driver():
     # Streamlit Cloud: packages.txt로 설치된 chromium/chromedriver를 직접 지정
     # (지정하지 않으면 Selenium Manager가 별도 Chrome을 받아오다 실행에 실패함)
     chromium_path = shutil.which("chromium") or shutil.which("chromium-browser")
     driver_path = shutil.which("chromedriver")
-    if chromium_path and driver_path:
+
+    if not (chromium_path and driver_path):
+        # 로컬 환경: 설치된 Chrome + Selenium Manager 자동 드라이버
+        options = _base_options()
+        options.add_argument("--headless=new")
+        return webdriver.Chrome(options=options)
+
+    # 클라우드 환경은 chromium 버전에 따라 통하는 플래그 조합이 달라서
+    # 알려진 조합을 순서대로 시도하고, 처음 성공하는 것을 사용한다
+    attempts = [
+        ("headless=new", [
+            "--headless=new", "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions",
+        ]),
+        ("headless + 호환 플래그", [
+            "--headless", "--disable-features=VizDisplayCompositor",
+            "--disable-features=NetworkService", "--ignore-certificate-errors",
+        ]),
+        ("single-process", [
+            "--headless=new", "--single-process", "--no-zygote",
+            "--disable-crash-reporter", "--disable-extensions",
+        ]),
+    ]
+
+    failures = []
+    for name, extra_args in attempts:
+        options = _base_options()
         options.binary_location = chromium_path
         # Chromium 136+는 프로필 폴더가 잠겨 있거나 기본 폴더를 쓰면 곧바로 종료됨
-        # -> 매번 새 임시 프로필 폴더를 만들어 지정
-        user_data_dir = tempfile.mkdtemp(prefix="chrome-profile-")
-        options.add_argument(f"--user-data-dir={user_data_dir}")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--disable-extensions")
+        options.add_argument(f"--user-data-dir={tempfile.mkdtemp(prefix='chrome-profile-')}")
+        for arg in extra_args:
+            options.add_argument(arg)
 
         log_path = os.path.join(tempfile.gettempdir(), "chromedriver.log")
         service = Service(driver_path, service_args=["--verbose"], log_output=log_path)
         try:
-            return webdriver.Chrome(service=service, options=options)
+            driver = webdriver.Chrome(service=service, options=options)
+            print(f"브라우저 실행 성공 (설정: {name})")
+            return driver
         except WebDriverException as e:
-            # 실제 원인이 담긴 chromedriver 로그 끝부분을 오류 메시지에 포함
             log_tail = ""
             try:
                 with open(log_path, encoding="utf-8", errors="replace") as f:
-                    log_tail = "".join(f.readlines()[-50:])
+                    log_tail = "".join(f.readlines()[-25:])
             except OSError:
                 pass
-            raise RuntimeError(
-                f"브라우저 실행 실패: {e.msg}\n\n[ChromeDriver 상세 로그]\n{log_tail}"
-            ) from e
+            failures.append(f"--- 시도 [{name}] 실패: {e.msg}\n{log_tail}")
 
-    # 로컬 환경: 설치된 Chrome + Selenium Manager 자동 드라이버
-    return webdriver.Chrome(options=options)
+    raise RuntimeError(
+        "모든 브라우저 실행 방법이 실패했습니다.\n\n" + "\n\n".join(failures)
+    )
 
 def click_more_button(driver, wait):
     try:
