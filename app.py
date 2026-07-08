@@ -10,6 +10,8 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from docx import Document
@@ -51,6 +53,33 @@ def _base_options():
     options.add_argument(f"user-agent={USER_AGENT}")
     return options
 
+def _log_tail(log_path, lines=25):
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-lines:])
+    except OSError:
+        return ""
+
+def _try_firefox(failures):
+    """ packages.txt로 설치된 Firefox로 실행 (geckodriver는 Selenium Manager가 자동 설치) """
+    firefox_path = shutil.which("firefox-esr") or shutil.which("firefox")
+    if not firefox_path:
+        return None
+    options = FirefoxOptions()
+    options.binary_location = firefox_path
+    options.add_argument("-headless")
+    options.add_argument("--width=1920")
+    options.add_argument("--height=1080")
+    options.set_preference("general.useragent.override", USER_AGENT)
+    log_path = os.path.join(tempfile.gettempdir(), "geckodriver.log")
+    try:
+        driver = webdriver.Firefox(service=FirefoxService(log_output=log_path), options=options)
+        print("브라우저 실행 성공 (Firefox)")
+        return driver
+    except WebDriverException as e:
+        failures.append(f"--- 시도 [Firefox] 실패: {e.msg}\n{_log_tail(log_path)}")
+        return None
+
 def create_driver():
     # Streamlit Cloud: packages.txt로 설치된 chromium/chromedriver를 직접 지정
     # (지정하지 않으면 Selenium Manager가 별도 Chrome을 받아오다 실행에 실패함)
@@ -63,8 +92,14 @@ def create_driver():
         options.add_argument("--headless=new")
         return webdriver.Chrome(options=options)
 
-    # 클라우드 환경은 chromium 버전에 따라 통하는 플래그 조합이 달라서
-    # 알려진 조합을 순서대로 시도하고, 처음 성공하는 것을 사용한다
+    failures = []
+
+    # 현재 Streamlit Cloud의 chromium은 실행 직후 크래시하는 문제가 있어 Firefox를 우선 사용
+    driver = _try_firefox(failures)
+    if driver:
+        return driver
+
+    # Firefox가 없거나 실패하면 chromium 플래그 조합을 순서대로 시도
     attempts = [
         ("headless=new", [
             "--headless=new", "--no-first-run", "--no-default-browser-check",
@@ -80,7 +115,6 @@ def create_driver():
         ]),
     ]
 
-    failures = []
     for name, extra_args in attempts:
         options = _base_options()
         options.binary_location = chromium_path
@@ -96,13 +130,7 @@ def create_driver():
             print(f"브라우저 실행 성공 (설정: {name})")
             return driver
         except WebDriverException as e:
-            log_tail = ""
-            try:
-                with open(log_path, encoding="utf-8", errors="replace") as f:
-                    log_tail = "".join(f.readlines()[-25:])
-            except OSError:
-                pass
-            failures.append(f"--- 시도 [{name}] 실패: {e.msg}\n{log_tail}")
+            failures.append(f"--- 시도 [{name}] 실패: {e.msg}\n{_log_tail(log_path)}")
 
     raise RuntimeError(
         "모든 브라우저 실행 방법이 실패했습니다.\n\n" + "\n\n".join(failures)
