@@ -74,6 +74,7 @@ def _try_firefox(failures):
     log_path = os.path.join(tempfile.gettempdir(), "geckodriver.log")
     try:
         driver = webdriver.Firefox(service=FirefoxService(log_output=log_path), options=options)
+        driver.set_page_load_timeout(60)
         print("브라우저 실행 성공 (Firefox)")
         return driver
     except WebDriverException as e:
@@ -90,7 +91,9 @@ def create_driver():
         # 로컬 환경: 설치된 Chrome + Selenium Manager 자동 드라이버
         options = _base_options()
         options.add_argument("--headless=new")
-        return webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(60)
+        return driver
 
     failures = []
 
@@ -127,6 +130,7 @@ def create_driver():
         service = Service(driver_path, service_args=["--verbose"], log_output=log_path)
         try:
             driver = webdriver.Chrome(service=service, options=options)
+            driver.set_page_load_timeout(60)
             print(f"브라우저 실행 성공 (설정: {name})")
             return driver
         except WebDriverException as e:
@@ -143,30 +147,68 @@ def click_more_button(driver, wait):
         time.sleep(0.5)
     except: pass
 
+def page_diagnostic(driver):
+    """ 클립 카드가 전혀 안 보일 때 차단/빈 페이지 여부 확인용 요약 """
+    try:
+        snippet = re.sub(r'\s+', ' ', driver.find_element(By.TAG_NAME, "body").text)[:200]
+        return f"(진단) 페이지 제목: {driver.title!r} / 본문 앞부분: {snippet!r}"
+    except WebDriverException as e:
+        return f"(진단) 페이지 상태 확인 실패: {e.msg}"
+
+def scroll_collect(driver, extract, target, max_scrolls=10, log=print):
+    """ 클립 목록을 스크롤하며 수집한다.
+
+    무한 대기를 막기 위해 스크롤 횟수를 제한하고, 두 번 연속 스크롤해도
+    새 카드가 로드되지 않으면 그때까지 모은 것만 반환한다.
+    반환값: (collected, 마지막으로 확인한 카드 개수)
+    """
+    collected = []
+    prev_count, stale = -1, 0
+    cards = []
+    for _ in range(max_scrolls):
+        cards = driver.find_elements(By.CSS_SELECTOR, "a.ClipCardV2_link_thumbnail__NWYf1")
+        for item in cards:
+            if len(collected) >= target: break
+            try:
+                extract(item, collected)
+            except Exception:
+                continue
+        if len(collected) >= target:
+            return collected, len(cards)
+        if len(cards) == prev_count:
+            stale += 1
+            if stale >= 2:
+                log(f"더 이상 새 클립이 로드되지 않아 {len(collected)}개로 진행합니다. (카드 {len(cards)}개 확인)")
+                return collected, len(cards)
+        else:
+            stale = 0
+        prev_count = len(cards)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+    log(f"스크롤 상한({max_scrolls}회)에 도달해 {len(collected)}개로 진행합니다. (카드 {len(cards)}개 확인)")
+    return collected, len(cards)
+
 # ==========================================
 # 2. 크롤링 핵심 모듈 (수정됨)
 # ==========================================
 
-def get_mbc_anchors_study(driver, doc, target_count=3):
+def get_mbc_anchors_study(driver, doc, target_count=3, log=print):
     """ MBC 앵커멘트 수집 (목표: 3개) """
-    print("\n--- [1] MBC 앵커멘트 수집 시작 ---")
+    log("--- [1] MBC 앵커멘트 수집 시작 ---")
     driver.get("https://tv.naver.com/imnews?tab=clip")
     time.sleep(3)
 
-    target_links = []
-    while len(target_links) < 10:
-        items = driver.find_elements(By.CSS_SELECTOR, "a.ClipCardV2_link_thumbnail__NWYf1")
-        for item in items:
-            if len(target_links) >= 10: break
-            try:
-                sec = parse_time_to_seconds(item.find_element(By.CSS_SELECTOR, "span.ClipCardV2_playtime__IHYFQ").text)
-                link = item.get_attribute("href")
-                if 140 <= sec <= 170 and link not in target_links:
-                    target_links.append(link)
-            except: continue
-        if len(target_links) >= 10: break
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+    def extract(item, collected):
+        sec = parse_time_to_seconds(item.find_element(By.CSS_SELECTOR, "span.ClipCardV2_playtime__IHYFQ").text)
+        link = item.get_attribute("href")
+        if 140 <= sec <= 170 and link not in collected:
+            collected.append(link)
+
+    target_links, card_count = scroll_collect(driver, extract, target=10, log=log)
+    if card_count == 0:
+        log(f"⚠️ 클립 카드가 하나도 로드되지 않았습니다. {page_diagnostic(driver)}")
+    elif len(target_links) < target_count:
+        log(f"⚠️ 재생시간 조건(2:20~2:50)에 맞는 클립이 {len(target_links)}개뿐입니다.")
 
     wait = WebDriverWait(driver, 5)
     success_count = 0
@@ -193,30 +235,31 @@ def get_mbc_anchors_study(driver, doc, target_count=3):
             set_style(run_body, size=13)
             p.paragraph_format.line_spacing = 1.6
             p.paragraph_format.space_after = Pt(20)
-            print(f"✅ {title_text} 완료")
+            log(f"✅ {title_text} 완료")
         except: continue
+    if success_count < target_count:
+        log(f"⚠️ 앵커멘트를 {success_count}/{target_count}개만 수집했습니다.")
+    return success_count
 
-def get_yonhap_shorts_study(driver, doc, target_count=7):
+def get_yonhap_shorts_study(driver, doc, target_count=7, log=print):
     """ 연합뉴스 단신 수집 (기존 단신+무예독 통합, 목표: 7개) """
-    print("\n--- [2] 연합뉴스 단신 수집 시작 ---")
+    log("--- [2] 연합뉴스 단신 수집 시작 ---")
     driver.get("https://tv.naver.com/yonhapnewstv?tab=clip")
     time.sleep(3)
 
-    target_links = []
-    while len(target_links) < 15: # 넉넉하게 확보
-        items = driver.find_elements(By.CSS_SELECTOR, "a.ClipCardV2_link_thumbnail__NWYf1")
-        for item in items:
-            if len(target_links) >= 15: break
-            try:
-                title = item.get_attribute("aria-label")
-                sec = parse_time_to_seconds(item.find_element(By.CSS_SELECTOR, "span.ClipCardV2_playtime__IHYFQ").text)
-                link = item.get_attribute("href")
-                if 40 <= sec <= 55 and "[속보]" not in title and link not in target_links:
-                    target_links.append(link)
-            except: continue
-        if len(target_links) >= 15: break
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+    def extract(item, collected):
+        title = item.get_attribute("aria-label")
+        sec = parse_time_to_seconds(item.find_element(By.CSS_SELECTOR, "span.ClipCardV2_playtime__IHYFQ").text)
+        link = item.get_attribute("href")
+        if 40 <= sec <= 55 and "[속보]" not in title and link not in collected:
+            collected.append(link)
+
+    # 넉넉하게 확보
+    target_links, card_count = scroll_collect(driver, extract, target=15, log=log)
+    if card_count == 0:
+        log(f"⚠️ 클립 카드가 하나도 로드되지 않았습니다. {page_diagnostic(driver)}")
+    elif len(target_links) < target_count:
+        log(f"⚠️ 재생시간 조건(40~55초)에 맞는 클립이 {len(target_links)}개뿐입니다.")
 
     wait = WebDriverWait(driver, 5)
     success_count = 0
@@ -236,33 +279,33 @@ def get_yonhap_shorts_study(driver, doc, target_count=7):
             set_style(run_body, size=13)
             p.paragraph_format.line_spacing = 1.6
             p.paragraph_format.space_after = Pt(20)
-            print(f"✅ {title_text} 완료")
+            log(f"✅ {title_text} 완료")
         except: continue
+    if success_count < target_count:
+        log(f"⚠️ 단신을 {success_count}/{target_count}개만 수집했습니다.")
+    return success_count
 
-def get_breaking_news_yonhap(driver, doc, target_count=5):
+def get_breaking_news_yonhap(driver, doc, target_count=5, log=print):
     """ 실시간 속보 수집 (목표: 5개) """
-    print(f"\n--- [3] 실시간 속보 수집 시작 ---")
+    log("--- [3] 실시간 속보 수집 시작 ---")
     driver.get("https://tv.naver.com/yonhapnewstv?tab=clip")
     time.sleep(3)
 
-    breaking_titles = []
-    while len(breaking_titles) < target_count:
-        items = driver.find_elements(By.CSS_SELECTOR, "a.ClipCardV2_link_thumbnail__NWYf1")
-        for item in items:
-            if len(breaking_titles) >= target_count: break
-            try:
-                title = item.get_attribute("aria-label")
-                if "[속보]" in title:
-                    clean_title = title
-                    if "재생시간" in clean_title: clean_title = clean_title.split("재생시간")[0]
-                    clean_title = re.sub(r'\s*\d+분\s*\d+초$', '', clean_title).strip()
-                    clean_title = re.sub(r'\s*\d+초$', '', clean_title).strip()
-                    if clean_title not in breaking_titles:
-                        breaking_titles.append(clean_title)
-            except: continue
-        if len(breaking_titles) >= target_count: break
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+    def extract(item, collected):
+        title = item.get_attribute("aria-label")
+        if "[속보]" in title:
+            clean_title = title
+            if "재생시간" in clean_title: clean_title = clean_title.split("재생시간")[0]
+            clean_title = re.sub(r'\s*\d+분\s*\d+초$', '', clean_title).strip()
+            clean_title = re.sub(r'\s*\d+초$', '', clean_title).strip()
+            if clean_title not in collected:
+                collected.append(clean_title)
+
+    breaking_titles, card_count = scroll_collect(driver, extract, target=target_count, log=log)
+    if card_count == 0:
+        log(f"⚠️ 클립 카드가 하나도 로드되지 않았습니다. {page_diagnostic(driver)}")
+    elif len(breaking_titles) < target_count:
+        log(f"⚠️ [속보] 클립이 {len(breaking_titles)}개뿐입니다.")
 
     p_title = doc.add_paragraph()
     run_title = p_title.add_run("<속보>")
@@ -273,7 +316,8 @@ def get_breaking_news_yonhap(driver, doc, target_count=5):
         run_body = p_item.add_run(f"{i}. {title}")
         set_style(run_body, size=13)
         p_item.paragraph_format.line_spacing = 1.6
-        print(f"✅ 속보 {i}번 완료")
+        log(f"✅ 속보 {i}번 완료")
+    return len(breaking_titles)
 
 # ==========================================
 # 3. 메인 컨트롤러
@@ -285,36 +329,50 @@ def main():
     st.markdown("MBC 앵커멘트(3개), 연합뉴스 단신(7개), 최신 속보(5개)를 한 번에 수집합니다.")
 
     if st.button("🚀 최신 스터디 원고 생성하기", type="primary"):
-        with st.spinner("최신 기사를 수집하고 있습니다. 잠시만 기다려주세요..."):
+        with st.status("최신 기사를 수집하고 있습니다. 잠시만 기다려주세요...", expanded=True) as status:
             driver = None
             try:
+                def log(msg):
+                    print(msg)
+                    st.write(msg)
+
                 driver = create_driver()
 
                 doc = Document()
                 for sec in doc.sections:
                     sec.top_margin, sec.bottom_margin = Pt(40), Pt(40)
                     sec.left_margin, sec.right_margin = Pt(50), Pt(50)
-                
+
                 # 원고 수집 실행
-                get_mbc_anchors_study(driver, doc, target_count=3)
-                get_yonhap_shorts_study(driver, doc, target_count=7)
-                get_breaking_news_yonhap(driver, doc, target_count=5)
-                
-                driver.quit()
-                
-                bio = io.BytesIO()
-                doc.save(bio)
-                
-                st.success("🎉 원고 작성이 완료되었습니다!")
-                st.download_button(
-                    label="📥 완성된 원고 다운로드 (.docx)",
-                    data=bio.getvalue(),
-                    file_name=f"Study_Scripts_{time.strftime('%Y%m%d')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-                
+                counts = [
+                    get_mbc_anchors_study(driver, doc, target_count=3, log=log),
+                    get_yonhap_shorts_study(driver, doc, target_count=7, log=log),
+                    get_breaking_news_yonhap(driver, doc, target_count=5, log=log),
+                ]
+
+                if sum(counts) == 0:
+                    status.update(label="수집 실패", state="error")
+                    st.error(
+                        "❌ 기사를 하나도 수집하지 못했습니다. 위 로그의 (진단) 내용을 확인해주세요. "
+                        "클라우드 서버 IP가 네이버에서 차단되었을 가능성이 있습니다."
+                    )
+                else:
+                    bio = io.BytesIO()
+                    doc.save(bio)
+
+                    status.update(label="수집 완료", state="complete")
+                    st.success(f"🎉 원고 작성이 완료되었습니다! (앵커멘트 {counts[0]}개 / 단신 {counts[1]}개 / 속보 {counts[2]}개)")
+                    st.download_button(
+                        label="📥 완성된 원고 다운로드 (.docx)",
+                        data=bio.getvalue(),
+                        file_name=f"Study_Scripts_{time.strftime('%Y%m%d')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+
             except Exception as e:
+                status.update(label="오류 발생", state="error")
                 st.error(f"❌ 오류 발생: {e}")
+            finally:
                 if driver: driver.quit()
 
 if __name__ == "__main__":
