@@ -70,7 +70,9 @@ def _try_firefox(failures):
     options.add_argument("-headless")
     options.add_argument("--width=1920")
     options.add_argument("--height=1080")
-    options.set_preference("general.useragent.override", USER_AGENT)
+    # UA를 Chrome으로 속이면 Akamai가 브라우저 지문 불일치로 차단할 수 있어
+    # Firefox 본래 UA를 그대로 쓰고, 언어만 한국어로 맞춘다
+    options.set_preference("intl.accept_languages", "ko-KR, ko, en-US, en")
     log_path = os.path.join(tempfile.gettempdir(), "geckodriver.log")
     try:
         driver = webdriver.Firefox(service=FirefoxService(log_output=log_path), options=options)
